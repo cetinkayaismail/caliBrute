@@ -39,7 +39,7 @@ When CaliBrute finds a valid credential, it doesn't waste time and resources tes
 
 ---
 
-## 🚀 Installation
+##  Installation
 
 Ensure you have Go installed on your system. You can compile CaliBrute natively or statically.
 
@@ -57,7 +57,7 @@ make build-static
 
 ---
 
-## 🛠️ Usage
+##  Usage
 
 ### Basic Usage
 The simplest way to use CaliBrute is to provide a raw request file and your wordlists. CaliBrute will automatically detect the username/password fields and inject the payloads.
@@ -103,7 +103,7 @@ If you already know exactly what a successful login looks like, you can bypass t
 
 ---
 
-## 📊 Example Output
+##  Example Output
 
 ```text
    ______      ___ ____                __       
@@ -134,7 +134,7 @@ If you already know exactly what a successful login looks like, you can bypass t
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, issues, and feature requests are welcome!
 Feel free to check the [issues page](https://github.com/yourusername/CaliBrute/issues) if you want to contribute.
@@ -147,7 +147,7 @@ Feel free to check the [issues page](https://github.com/yourusername/CaliBrute/i
 
 ---
 
-## 📄 License
+##  License
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
