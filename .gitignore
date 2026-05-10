@@ -1,0 +1,16 @@
+# Binaries
+calibrute
+brutal
+*.exe
+*_mac
+*_unix
+
+# Dependencies
+vendor/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
