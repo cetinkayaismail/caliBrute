@@ -8,22 +8,29 @@ While standard tools blindly throw payloads at a server and guess success based 
 
 ##  Key Features
 
-### 1. Auto-Calibration Engine & Smart Detection
-Traditional tools break when a target application reflects the username in the error message (e.g., *"The password for C0ldd is incorrect"* vs *"User admin not found"*). This reflection changes the `Content-Length` dynamically, causing massive false positives.
-* **Per-User Baselines:** CaliBrute automatically sends hidden dummy requests for *each* username before starting the attack.
-* **Reflection Multipliers:** It mathematically calculates how many times the username and password are reflected in the response body.
-* **Fuzzy Matching:** It establishes a baseline expected length and only flags a success if the response length deviates beyond a fuzzy threshold or if a `3xx Redirect` occurs.
+### 1. Heuristic Success Detection Engine
+Traditional tools break when a target application reflects the username in the error message or when a WAF blocks requests, changing the page content. CaliBrute uses a multi-signal heuristic engine:
+* **Per-User Baselines:** Automatically sends hidden dummy requests for *each* username to detect reflection multipliers (how many times user/pass appear in the body).
+* **Keyword Analysis:** Looks for "Success Indicators" (e.g., *Welcome*, *Dashboard*, *Logout*) and "Failure Indicators" (e.g., *Invalid*, *Incorrect*) to score each response.
+* **Redirect Intelligence:** Analyzes the `Location` header to distinguish between "Failure Redirects" (back to login/error pages) and "Success Redirects" (to home/profile).
+* **SHA256 Content Hashing:** Detects if a response is identical to the failure baseline, even if dynamic elements (like timestamps) are present, by comparing structural hashes.
+* **Fuzzy Matching:** Only flags a success if the response deviates beyond a calibrated threshold and earns a high heuristic score.
 
-### 2. Seamless Burp Suite Integration (Auto-Inject)
+### 2. Rate Limit & WAF Resilience
+CaliBrute is built to survive aggressive defensive measures:
+* **Automatic Block Detection:** Detects HTTP 429 (Too Many Requests) and specific "Blocked" keywords (e.g., *Rate limit*, *WAF*, *Captcha*, *Security Check*).
+* **Smart Backoff:** When a block is detected, the engine intelligently pauses for 30 seconds before retrying, preventing permanent IP bans and ensuring your wordlist isn't wasted.
+
+### 3. Seamless Burp Suite Integration (Auto-Inject)
 No need to manually construct complex `curl` commands or manually place `^USER^` and `^PASS^` markers.
 * Simply right-click a request in Burp Suite, select **"Copy to file"**, and feed it to CaliBrute.
 * **Auto-Inject:** CaliBrute automatically scans the request body (both Form Data and JSON) for common credential fields (e.g., `log`, `user`, `pwd`, `password`) and injects the payloads intelligently.
 * It recalculates the exact `Content-Length` on the fly so the HTTP structure is never broken.
 
-### 3. Account Lockout Prevention
+### 4. Account Lockout Prevention
 * **Pass-First Strategy:** By default, CaliBrute iterates through *all users* for a single password before moving to the next password. This horizontal brute-forcing technique drastically reduces the chance of triggering account lockouts on the target system.
 
-### 4. Advanced Stealth & WAF Evasion
+### 5. Advanced Stealth & WAF Evasion
 When you need to fly completely under the radar, the `--stealth` flag activates a suite of evasion tactics:
 * **Proxy Rotation:** Supply a file with `--proxies` to automatically route your traffic through a rotating list of HTTP and SOCKS5 proxies. Each attempt utilizes a fresh proxy to bypass IP-based rate limiting entirely.
 * **IP Spoofing:** Randomizes `X-Forwarded-For`, `X-Real-IP`, and `X-Client-IP` headers on every single request to confuse backend logging systems.
@@ -31,7 +38,7 @@ When you need to fly completely under the radar, the `--stealth` flag activates 
 * **Jitter Delays:** Adds human-like randomized delays (1-5 seconds) between requests to avoid triggering time-based anomaly detectors.
 * **Statelessness:** Enforces `Connection: close` and completely drops cookies between attempts to prevent session-based tracking.
 
-### 5. Early Exit & Clean UI
+### 6. Early Exit & Clean UI
 When CaliBrute finds a valid credential, it doesn't waste time and resources testing the remaining millions of passwords.
 * It instantly sends a stop signal to all running worker threads.
 * Flushes the remaining in-flight requests.

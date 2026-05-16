@@ -6,9 +6,9 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
-	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"calibrute/pkg/models"
 	"calibrute/pkg/parser"
@@ -74,6 +74,8 @@ func (e *Engine) Start() error {
 				stopOnce.Do(func() {
 					close(stopChan) // Signal all workers and feeder to stop
 				})
+			} else if res.IsBlocked {
+				fmt.Printf("[BLOCKED] [Attempt: %d] User: %s | Pass: %s | Status: %d | Reason: %s\n", res.Index, res.User, res.Pass, res.StatusCode, res.Reason)
 			} else if e.Config.VerboseLevel >= 1 {
 				fmt.Printf("[FAIL] [Attempt: %d] User: %s | Pass: %s | Status: %d | Len: %d\n", res.Index, res.User, res.Pass, res.StatusCode, res.Length)
 			}
@@ -115,32 +117,33 @@ func (e *Engine) generateBaselines() error {
 		return err
 	}
 
-	sendReq := func(u, p string) (int, int, http.Header, error) {
+	sendReq := func(u, p string) (int, int, string, http.Header, error) {
 		req, err := parser.BuildRequest(e.Template, u, p)
 		if err != nil {
-			return 0, 0, nil, err
+			return 0, 0, "", nil, err
 		}
 		if e.Config.StealthMode {
 			utils.ApplyStealthHeaders(req)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			return 0, 0, nil, err
+			return 0, 0, "", nil, err
 		}
 		defer resp.Body.Close()
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, len(bodyBytes), resp.Header, nil
+		return resp.StatusCode, len(bodyBytes), string(bodyBytes), resp.Header, nil
 	}
 
 	for _, user := range e.Config.UserList {
 		basePass := "calibrutedummypass"
-		s1, l1, h1, err := sendReq(user, basePass)
+		s1, l1, b1, h1, err := sendReq(user, basePass)
 		if err != nil {
 			return err
 		}
 
+		// 1. Check Pass Reflection
 		passX := "calibrutedummypassXX"
-		_, l2, _, err := sendReq(user, passX)
+		_, l2, _, _, err := sendReq(user, passX)
 		if err != nil {
 			return err
 		}
@@ -150,16 +153,32 @@ func (e *Engine) generateBaselines() error {
 			passMultiplier = 0
 		}
 
+		// 2. Check User Reflection
+		userX := user + "XX"
+		_, l3, _, _, err := sendReq(userX, basePass)
+		if err != nil {
+			return err
+		}
+
+		userMultiplier := (l3 - l1) / (len(userX) - len(user))
+		if userMultiplier < 0 {
+			userMultiplier = 0
+		}
+
 		e.Baselines[user] = &models.Baseline{
 			StatusCode:     s1,
 			Length:         l1,
 			Headers:        h1,
+			BaseUserLen:    len(user),
 			BasePassLen:    len(basePass),
+			UserMultiplier: userMultiplier,
 			PassMultiplier: passMultiplier,
+			BodyHash:       utils.GetSHA256(b1),
+			Body:           b1, // Store full body for keyword analysis
 		}
 
 		if e.Config.VerboseLevel > 0 {
-			log.Printf("[+] Baseline for user '%s': Len %d, Pass reflected %dx", user, l1, passMultiplier)
+			log.Printf("[+] Baseline for user '%s': Len %d, User reflected %dx, Pass reflected %dx", user, l1, userMultiplier, passMultiplier)
 		}
 	}
 
@@ -169,17 +188,15 @@ func (e *Engine) generateBaselines() error {
 func (e *Engine) worker(attempts <-chan models.Attempt, results chan<- models.Result, wg *sync.WaitGroup, stopChan <-chan struct{}) {
 	defer wg.Done()
 
-	// Each worker needs its own client to avoid race conditions on proxy rotation, though we can build per request if stealth
-	
 	for attempt := range attempts {
 		select {
 		case <-stopChan:
-			return // Exit immediately if a success was found
+			return
 		default:
 		}
 
 		if attempt.Index < e.Config.ResumeIndex {
-			continue // Skip until resume index
+			continue
 		}
 
 		utils.JitterDelay(e.Config.StealthMode)
@@ -201,7 +218,6 @@ func (e *Engine) worker(attempts <-chan models.Attempt, results chan<- models.Re
 			log.Printf("\n--- OUTGOING REQUEST ---\n%s\n------------------------\n", string(dump))
 		}
 
-		// Build client per request to handle proxy rotation properly
 		client, _ := utils.BuildClient(e.Config)
 		
 		resp, err := client.Do(req)
@@ -217,27 +233,22 @@ func (e *Engine) worker(attempts <-chan models.Attempt, results chan<- models.Re
 
 		bodyStr := string(bodyBytes)
 
-		// Pre-analysis MatchString check
-		if e.Config.MatchString != "" && strings.Contains(bodyStr, e.Config.MatchString) {
-			res := models.Result{
-				Index:      attempt.Index,
-				User:       attempt.User,
-				Pass:       attempt.Pass,
-				StatusCode: resp.StatusCode,
-				Length:     len(bodyBytes),
-				IsSuccess:  true,
-				Reason:     "Matched String",
-			}
-			results <- res
-			continue
-		}
-
 		// Analyze
 		var bl *models.Baseline
 		if e.Baselines != nil {
 			bl = e.Baselines[attempt.User]
 		}
-		res := scanner.AnalyzeResult(attempt, resp.StatusCode, len(bodyBytes), resp.Header, bl, e.Config)
+		res := scanner.AnalyzeResult(attempt, resp.StatusCode, len(bodyBytes), bodyStr, resp.Header, bl, e.Config)
+		
+		if res.IsBlocked {
+			fmt.Printf("\n[!] RATE LIMIT / BLOCK DETECTED: %s\n", res.Reason)
+			fmt.Println("[*] Pausing for 30 seconds before retrying...")
+			time.Sleep(30 * time.Second)
+			
+			// Re-enqueue the attempt (optional, for now we just log and continue or user can resume)
+			// For simplicity, we'll just send the result so the processor can decide
+		}
+
 		results <- res
 	}
 }

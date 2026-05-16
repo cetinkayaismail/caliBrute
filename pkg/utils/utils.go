@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -86,4 +88,10 @@ func JitterDelay(stealth bool) {
 	// Sleep between 1000ms and 5000ms
 	delay := rand.Intn(4000) + 1000
 	time.Sleep(time.Duration(delay) * time.Millisecond)
+}
+
+// GetSHA256 returns the SHA256 hash of a string
+func GetSHA256(data string) string {
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
 }

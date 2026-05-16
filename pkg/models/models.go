@@ -48,6 +48,8 @@ type Baseline struct {
 	PassMultiplier int // How many times Pass is reflected
 	BaseUserLen    int
 	BasePassLen    int
+	BodyHash       string // SHA256 of the body
+	Body           string // Truncated or full body for structural analysis
 }
 
 // Result represents the outcome of a single attempt
@@ -59,5 +61,6 @@ type Result struct {
 	Length         int
 	ExpectedLength int
 	IsSuccess      bool
+	IsBlocked      bool   // Flag for rate-limiting/WAF
 	Reason         string // E.g., "Status Code Changed", "Length Difference", "Redirect"
 }

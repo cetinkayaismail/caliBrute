@@ -2,6 +2,8 @@ package scanner
 
 import (
 	"calibrute/pkg/models"
+	"calibrute/pkg/utils"
+	"strings"
 )
 
 // AbsInt returns the absolute value of an integer
@@ -12,8 +14,12 @@ func AbsInt(n int) int {
 	return n
 }
 
+var successKeywords = []string{"dashboard", "welcome", "logout", "settings", "profile", "admin", "success", "my account", "authenticated"}
+var failureKeywords = []string{"invalid", "incorrect", "failed", "error", "denied", "wrong", "unauthorized", "retry"}
+var blockKeywords = []string{"rate limit", "too many requests", "blocked", "waf", "captcha", "security check", "ip banned", "access denied"}
+
 // AnalyzeResult compares the current attempt's response against the baseline and configuration
-func AnalyzeResult(attempt models.Attempt, statusCode int, length int, headers map[string][]string, baseline *models.Baseline, cfg *models.Config) models.Result {
+func AnalyzeResult(attempt models.Attempt, statusCode int, length int, body string, headers map[string][]string, baseline *models.Baseline, cfg *models.Config) models.Result {
 	res := models.Result{
 		Index:      attempt.Index,
 		User:       attempt.User,
@@ -23,9 +29,25 @@ func AnalyzeResult(attempt models.Attempt, statusCode int, length int, headers m
 		IsSuccess:  false,
 	}
 
+	bodyLower := strings.ToLower(body)
+
+	// 0. Rate Limit / Block Detection (Highest Priority)
+	if statusCode == 429 {
+		res.IsBlocked = true
+		res.Reason = "Rate Limited (429)"
+		return res
+	}
+
+	for _, blockWord := range blockKeywords {
+		if strings.Contains(bodyLower, blockWord) {
+			res.IsBlocked = true
+			res.Reason = "Block Detected: " + blockWord
+			return res
+		}
+	}
+
 	// 1. Manual Overrides Strategy
 	if cfg.MatchCode != 0 || cfg.MatchString != "" || cfg.MatchLength != 0 {
-		// If manual matchers are used, we ignore baseline completely
 		if cfg.MatchCode != 0 && statusCode == cfg.MatchCode {
 			res.IsSuccess = true
 			res.Reason = "Matched Status Code"
@@ -36,61 +58,92 @@ func AnalyzeResult(attempt models.Attempt, statusCode int, length int, headers m
 			res.Reason = "Matched Content Length"
 			return res
 		}
-		// MatchString is handled by the engine reading the body directly, 
-		// so if it was found, we assume engine passes a specific flag, but 
-		// for now we'll handle MatchString logic in the Engine before calling Analyze.
+		// MatchString is handled by engine, but we could add it here too
 		return res
 	}
 
 	// 2. Smart Baseline Strategy
 	if baseline == nil {
-		// Should not happen unless baseline failed
 		return res
 	}
 
-	// a) Status Code Change
+	// a) Exact Match Check (Hash)
+	currentHash := utils.GetSHA256(body)
+	if currentHash == baseline.BodyHash {
+		// Content is identical to failure baseline
+		return res
+	}
+
+	// b) Heuristic Scoring
+	score := 0
+
+	// Status Code Change
 	if statusCode != baseline.StatusCode {
-		// Specifically flag 3xx redirects
-		if statusCode >= 300 && statusCode < 400 {
-			res.IsSuccess = true
-			res.Reason = "Status Code Redirect (3xx)"
-			return res
+		if statusCode >= 200 && statusCode < 300 {
+			score += 50
 		}
+		if statusCode >= 300 && statusCode < 400 {
+			// Redirect Analysis
+			loc := ""
+			if val, ok := headers["Location"]; ok && len(val) > 0 {
+				loc = strings.ToLower(val[0])
+			}
 
-		// Any other significant status change (e.g. 401 -> 200)
-		res.IsSuccess = true
-		res.Reason = "Status Code Changed"
-		return res
+			isFailureRedirect := false
+			failRedirectWords := []string{"login", "auth", "error", "fail", "wrong"}
+			for _, w := range failRedirectWords {
+				if strings.Contains(loc, w) {
+					isFailureRedirect = true
+					break
+				}
+			}
+
+			if isFailureRedirect {
+				score -= 30
+			} else {
+				score += 60 // Likely a dashboard redirect
+				res.Reason = "Redirect to " + loc
+			}
+		}
 	}
 
-	// b) Fuzzy Length Change using Auto-Calibrated Expected Length
+	// Keyword Analysis
+	for _, kw := range successKeywords {
+		if strings.Contains(bodyLower, kw) {
+			score += 40
+			res.Reason = "Found Success Keyword: " + kw
+		}
+	}
+
+	for _, kw := range failureKeywords {
+		if strings.Contains(bodyLower, kw) {
+			score -= 40
+		}
+	}
+
+	// Length Analysis
 	expectedLength := baseline.Length +
 		(len(attempt.User)-baseline.BaseUserLen)*baseline.UserMultiplier +
 		(len(attempt.Pass)-baseline.BasePassLen)*baseline.PassMultiplier
 
 	res.ExpectedLength = expectedLength
-
-	// If the difference between actual length and expected length is greater than fuzzy threshold
-	if AbsInt(length-expectedLength) > cfg.Fuzzy {
-		res.IsSuccess = true
-		res.Reason = "Content Length Changed"
-		return res
+	lenDiff := AbsInt(length - expectedLength)
+	if lenDiff > cfg.Fuzzy {
+		score += 30
 	}
 
-	// c) Header Delta Change (Looking for new Set-Cookie or Location)
+	// Header Analysis
 	if _, ok := headers["Set-Cookie"]; ok {
 		if _, baselineOk := baseline.Headers["Set-Cookie"]; !baselineOk {
-			res.IsSuccess = true
-			res.Reason = "New Set-Cookie Header"
-			return res
+			score += 20
 		}
 	}
-	
-	if _, ok := headers["Location"]; ok {
-		if _, baselineOk := baseline.Headers["Location"]; !baselineOk {
-			res.IsSuccess = true
-			res.Reason = "New Location Header"
-			return res
+
+	// Final Decision
+	if score >= 50 {
+		res.IsSuccess = true
+		if res.Reason == "" {
+			res.Reason = "Heuristic Match"
 		}
 	}
 
