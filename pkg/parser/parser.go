@@ -69,21 +69,47 @@ func autoInjectPlaceholders(raw string) string {
 		return raw
 	}
 
-	// 1. Form Data Heuristics (e.g. log=admin&pwd=1)
-	userFormRe := regexp.MustCompile(`(?i)(user|username|log|email|account)=([^&\s]+)`)
-	raw = userFormRe.ReplaceAllString(raw, "${1}=^USER^")
+	parts := strings.SplitN(raw, "\r\n\r\n", 2)
+	headers := parts[0]
+	var body string
+	if len(parts) > 1 {
+		body = parts[1]
+	}
 
-	passFormRe := regexp.MustCompile(`(?i)(pass|password|pwd)=([^&\s]+)`)
-	raw = passFormRe.ReplaceAllString(raw, "${1}=^PASS^")
+	if body == "" {
+		return raw
+	}
 
-	// 2. JSON Heuristics (e.g. {"username": "admin", "password": "1"})
-	userJsonRe := regexp.MustCompile(`(?i)"(user|username|log|email|account)"\s*:\s*"([^"]+)"`)
-	raw = userJsonRe.ReplaceAllString(raw, `"${1}":"^USER^"`)
+	// Extract Content-Type header to see if it is JSON
+	contentType := ""
+	ctRegex := regexp.MustCompile(`(?im)^Content-Type:\s*([^\s\r\n;]+)`)
+	ctMatches := ctRegex.FindStringSubmatch(headers)
+	if len(ctMatches) > 1 {
+		contentType = strings.ToLower(ctMatches[1])
+	}
 
-	passJsonRe := regexp.MustCompile(`(?i)"(pass|password|pwd)"\s*:\s*"([^"]+)"`)
-	raw = passJsonRe.ReplaceAllString(raw, `"${1}":"^PASS^"`)
+	if strings.Contains(contentType, "json") {
+		// 1. JSON Heuristics (e.g. {"username": "admin", "password": "1"})
+		// Match the keys and replace their values securely
+		userJsonRe := regexp.MustCompile(`(?i)"(user|username|log|email|account|usr)"\s*:\s*"[^"]*"`)
+		body = userJsonRe.ReplaceAllString(body, `"${1}":"^USER^"`)
 
-	return raw
+		passJsonRe := regexp.MustCompile(`(?i)"(pass|password|pwd|psw)"\s*:\s*"[^"]*"`)
+		body = passJsonRe.ReplaceAllString(body, `"${1}":"^PASS^"`)
+	} else {
+		// 2. Form Data / URL Encoded Heuristics (e.g. log=admin&pwd=1)
+		// We use parameter boundaries to match correctly and safely support empty/null inputs (e.g., username=&password=)
+		userFormRe := regexp.MustCompile(`(?i)(^|&)(user|username|log|email|account|usr)=[^&\s]*`)
+		body = userFormRe.ReplaceAllString(body, "${1}${2}=^USER^")
+
+		passFormRe := regexp.MustCompile(`(?i)(^|&)(pass|password|pwd|psw)=[^&\s]*`)
+		body = passFormRe.ReplaceAllString(body, "${1}${2}=^PASS^")
+	}
+
+	if len(parts) > 1 {
+		return headers + "\r\n\r\n" + body
+	}
+	return headers
 }
 
 // BuildRequest creates a ready-to-execute *http.Request with the placeholders replaced.

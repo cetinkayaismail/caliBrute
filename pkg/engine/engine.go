@@ -17,9 +17,10 @@ import (
 )
 
 type Engine struct {
-	Config   *models.Config
+	Config    *models.Config
 	Template  *models.RawRequest
 	Baselines map[string]*models.Baseline
+	Client    *http.Client
 }
 
 func NewEngine(cfg *models.Config, tpl *models.RawRequest) *Engine {
@@ -32,6 +33,12 @@ func NewEngine(cfg *models.Config, tpl *models.RawRequest) *Engine {
 
 // Start kicks off the brute force process
 func (e *Engine) Start() error {
+	client, err := utils.BuildClient(e.Config)
+	if err != nil {
+		return fmt.Errorf("failed to build client: %v", err)
+	}
+	e.Client = client
+
 	// 1. Generate Baseline if manual overrides are not completely satisfying
 	if e.Config.MatchCode == 0 && e.Config.MatchLength == 0 && e.Config.MatchString == "" {
 		if e.Config.VerboseLevel > 0 {
@@ -112,10 +119,7 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) generateBaselines() error {
-	client, err := utils.BuildClient(e.Config)
-	if err != nil {
-		return err
-	}
+	client := e.Client
 
 	sendReq := func(u, p string) (int, int, string, http.Header, error) {
 		req, err := parser.BuildRequest(e.Template, u, p)
@@ -199,54 +203,73 @@ func (e *Engine) worker(attempts <-chan models.Attempt, results chan<- models.Re
 			continue
 		}
 
-		utils.JitterDelay(e.Config.StealthMode)
-
-		req, err := parser.BuildRequest(e.Template, attempt.User, attempt.Pass)
-		if err != nil {
-			if e.Config.VerboseLevel > 0 {
-				log.Printf("[-] Failed to build request for %s:%s -> %v\n", attempt.User, attempt.Pass, err)
+		var res models.Result
+		maxRetries := 5
+		for retry := 0; retry < maxRetries; retry++ {
+			select {
+			case <-stopChan:
+				return
+			default:
 			}
-			continue
-		}
 
-		if e.Config.StealthMode {
-			utils.ApplyStealthHeaders(req)
-		}
+			utils.JitterDelay(e.Config.StealthMode)
 
-		if e.Config.VerboseLevel >= 2 {
-			dump, _ := httputil.DumpRequestOut(req, true)
-			log.Printf("\n--- OUTGOING REQUEST ---\n%s\n------------------------\n", string(dump))
-		}
-
-		client, _ := utils.BuildClient(e.Config)
-		
-		resp, err := client.Do(req)
-		if err != nil {
-			if e.Config.VerboseLevel > 0 {
-				log.Printf("[-] Request failed: %v\n", err)
+			req, err := parser.BuildRequest(e.Template, attempt.User, attempt.Pass)
+			if err != nil {
+				if e.Config.VerboseLevel > 0 {
+					log.Printf("[-] Failed to build request for %s:%s -> %v\n", attempt.User, attempt.Pass, err)
+				}
+				break
 			}
-			continue
-		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+			if e.Config.StealthMode {
+				utils.ApplyStealthHeaders(req)
+			}
 
-		bodyStr := string(bodyBytes)
+			if e.Config.VerboseLevel >= 2 {
+				dump, _ := httputil.DumpRequestOut(req, true)
+				log.Printf("\n--- OUTGOING REQUEST ---\n%s\n------------------------\n", string(dump))
+			}
 
-		// Analyze
-		var bl *models.Baseline
-		if e.Baselines != nil {
-			bl = e.Baselines[attempt.User]
-		}
-		res := scanner.AnalyzeResult(attempt, resp.StatusCode, len(bodyBytes), bodyStr, resp.Header, bl, e.Config)
-		
-		if res.IsBlocked {
-			fmt.Printf("\n[!] RATE LIMIT / BLOCK DETECTED: %s\n", res.Reason)
-			fmt.Println("[*] Pausing for 30 seconds before retrying...")
-			time.Sleep(30 * time.Second)
-			
-			// Re-enqueue the attempt (optional, for now we just log and continue or user can resume)
-			// For simplicity, we'll just send the result so the processor can decide
+			resp, err := e.Client.Do(req)
+			if err != nil {
+				if e.Config.VerboseLevel > 0 {
+					log.Printf("[-] Request failed: %v\n", err)
+				}
+				// Sleep a bit on network failure and retry
+				select {
+				case <-stopChan:
+					return
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			bodyStr := string(bodyBytes)
+
+			// Analyze
+			var bl *models.Baseline
+			if e.Baselines != nil {
+				bl = e.Baselines[attempt.User]
+			}
+			res = scanner.AnalyzeResult(attempt, resp.StatusCode, len(bodyBytes), bodyStr, resp.Header, bl, e.Config)
+
+			if res.IsBlocked {
+				fmt.Printf("\n[!] RATE LIMIT / BLOCK DETECTED: %s\n", res.Reason)
+				fmt.Printf("[*] Pausing for 30 seconds before retrying (Attempt %d/%d) for user: %s...\n", retry+1, maxRetries, attempt.User)
+				
+				select {
+				case <-stopChan:
+					return
+				case <-time.After(30 * time.Second):
+				}
+				continue
+			}
+
+			break
 		}
 
 		results <- res

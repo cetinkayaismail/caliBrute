@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -26,12 +27,12 @@ func GetRandomUserAgent() string {
 
 // GenerateSpoofedIP generates a random IP address string for X-Forwarded-For
 func GenerateSpoofedIP() string {
-	return string([]byte{
-		byte(rand.Intn(256)), '.',
-		byte(rand.Intn(256)), '.',
-		byte(rand.Intn(256)), '.',
-		byte(rand.Intn(256)),
-	})
+	return fmt.Sprintf("%d.%d.%d.%d",
+		rand.Intn(256),
+		rand.Intn(256),
+		rand.Intn(256),
+		rand.Intn(256),
+	)
 }
 
 // BuildClient creates an HTTP client based on the configuration
@@ -41,18 +42,21 @@ func BuildClient(cfg *models.Config) (*http.Client, error) {
 		DisableKeepAlives: cfg.StealthMode,                       // If stealth, close connections
 	}
 
-	// Handle Proxy
+	// Handle Proxy & Dynamic Proxy Rotation
 	if cfg.Proxy != "" {
 		proxyURL, err := url.Parse(cfg.Proxy)
 		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	} else if len(cfg.ProxyList) > 0 {
-		// Pick a random proxy from the list
-		p := cfg.ProxyList[rand.Intn(len(cfg.ProxyList))]
-		proxyURL, err := url.Parse(p)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
+		// Dynamically rotate proxy for each request
+		transport.Proxy = func(req *http.Request) (*url.URL, error) {
+			p := cfg.ProxyList[rand.Intn(len(cfg.ProxyList))]
+			proxyURL, err := url.Parse(p)
+			if err != nil {
+				return nil, err
+			}
+			return proxyURL, nil
 		}
 	}
 
